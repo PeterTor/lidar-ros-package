@@ -1,0 +1,162 @@
+#!/usr/bin/python
+import roslib
+import quadrant
+import csv
+import rospy
+import tf
+import turtlesim.msg
+import tf.msg
+import geometry_msgs.msg
+from sensor_msgs.msg import NavSatFix,NavSatStatus
+from math import sin, cos, pi
+from numpy import *
+import latlon2UTM
+from nav_msgs.msg import Odometry
+
+#value to approximate position without drift correction
+zero_yaw = 103.169032489
+utm_x=548702.612632
+utm_y= 5804442.9321
+yaw = -101.368818251*pi/180
+scale=1.00693547981
+writer_hector=0
+
+with open('hector_utm.csv', 'w') as csvfile:
+    fieldnames = ['time','x_utm', 'y_utm']
+    writer_hector = csv.DictWriter(csvfile, fieldnames=fieldnames)
+    writer_hector.writeheader()
+
+with open('amcl_utm.csv', 'w') as csvfile:
+    fieldnames = ['time','x_utm', 'y_utm','quat_x','quat_y','quat_z','quat_w','roll','pitch','yaw','cov_11','cov_12','cov_21','cov_22','cov_66','latitude','longitude']
+    writer_amcl = csv.DictWriter(csvfile, fieldnames=fieldnames)
+    writer_amcl.writeheader()
+
+class DynamicTFBroadcaster:
+
+    def getRotMatrix(self,yaw):
+	rotmatrix = array([[cos(yaw), -sin(yaw)],[sin(yaw),cos(yaw)]])
+	return rotmatrix
+       
+    def translateOdom_Amcl(self,data):
+	global yaw,scale,utm_x,utm_y,tx,ty,zero_yaw 
+	#init msg
+	t = geometry_msgs.msg.PoseWithCovarianceStamped()
+        t.header.frame_id = "odom"
+	t.header.stamp = data.header.stamp
+	
+	#transform params
+	xy= array([data.pose.pose.position.x,data.pose.pose.position.y])
+	xy_tran=dot(self.getRotMatrix(yaw),xy)*scale+array([utm_x,utm_y])
+	
+	#quadrant returns also the current transformation parameter, in this case they are not used, so you can 
+	#ignor t_array1 and t_array2
+	#t_array1 and 2 contains the transformation parameter w,yaw,s,tx,ty
+	(quadrant_x,quadrant_y,t_array1,t_array2)=quadrant.start(data.pose.pose.position.x,data.pose.pose.position.y,xy_tran[0],xy_tran[1])
+	
+	#store transformated x and y
+	xy_tran[0]=quadrant_x
+	xy_tran[1]=quadrant_y
+	t.pose.pose.position.x=quadrant_x
+	t.pose.pose.position.y=quadrant_y
+	t.pose.pose.position.z=0
+	
+	#get roll pitch yaw from quaternion
+    	quaternion = (
+		data.pose.pose.orientation.x,
+		data.pose.pose.orientation.y,
+		data.pose.pose.orientation.z,
+		data.pose.pose.orientation.w,
+		)
+	euler = tf.transformations.euler_from_quaternion(quaternion)
+	roll = euler[0]
+	pitch = euler[1]
+	current_yaw = euler[2]	
+
+	#rotate yaw into UTM frame
+	#t.pose.pose.orientation=quat
+	yaw_corrected = euler[2] + (t_array1[0]*t_array1[1]+t_array2[0]*t_array2[1])
+	if (yaw_corrected * 180/pi )> 360:
+		yaw_corrected = yaw_corrected - 2*pi
+	
+	#store quaternion into pose message
+	quat=tf.transformations.quaternion_from_euler(roll,pitch,yaw_corrected)
+	t.pose.pose.orientation.x = quat[0]
+    	t.pose.pose.orientation.y = quat[1]
+    	t.pose.pose.orientation.z = quat[2]
+    	t.pose.pose.orientation.w = quat[3]
+    	covar=data.pose.covariance
+	t.pose.covariance=data.pose.covariance
+	#tfm = tf.msg.tfMessage([t])
+    	self.pub_odom_Amcl.publish(t)
+	
+	#xxyy= array([quadrant_y,quadrant_x])
+	#xy_two_tran=array([quadrant_y,quadrant_x])
+	#xy_two_tran=dot(self.getRotMatrix(0.00106384748071*pi/180),xxyy)*0.997763591626+array([12990.7822083,1120.47168391])
+	
+	#return also Latlong Navsat message in order to plot it with rendevouz (gmaps)	
+	navData = NavSatFix()
+    	navData.header.frame_id = "odom"
+    	navData.header.stamp = data.header.stamp
+    	navData.status.status = NavSatStatus.STATUS_FIX
+    	navData.status.service = NavSatStatus.SERVICE_GPS
+    	(navData.latitude,navData.longitude) = latlon2UTM.UTMtoLL(23, quadrant_y, quadrant_x,"32U")
+	#(navData.latitude,navData.longitude) = latlon2UTM.UTMtoLL(23, xy_two_tran[0], xy_two_tran[1],"32U")
+    	navData.altitude = float('NaN')
+    	navData.position_covariance_type = NavSatFix.COVARIANCE_TYPE_UNKNOWN
+    	self.pub_odom_latlong.publish(navData)
+	
+	#delay = rospy.Duration.from_sec(0.642)
+	delay = rospy.Duration.from_sec(0)
+	time = data.header.stamp + delay
+
+	with open('amcl_utm.csv', 'a') as csvfile:
+		fieldnames = ['time','x_utm', 'y_utm','quat_x','quat_y','quat_z','quat_w','roll','pitch','yaw','cov_11','cov_12','cov_21','cov_22','cov_66','latitude','longitude']
+    		writer_amcl = csv.DictWriter(csvfile, fieldnames=fieldnames)
+		writer_amcl.writerow({'time': time ,'x_utm': xy_tran[1], 'y_utm': xy_tran[0], 'quat_x':quat[0],'quat_y':quat[1],'quat_z':quat[2],'quat_w':quat[3], 'roll':roll, 'pitch':pitch,'yaw':yaw_corrected, 'cov_11':covar[0],'cov_12':covar[1],'cov_21':covar[6],'cov_22':covar[7],'cov_66':covar[35], 'latitude':navData.latitude, 'longitude':navData.longitude})
+	
+	
+
+    def translateOdom_Hector(self,data):
+	global yaw,scale,utm_x,utm_y,writer_hector
+	#init msg
+	t = geometry_msgs.msg.PoseStamped()
+        t.header.frame_id = "odom"
+	t.header.stamp = data.header.stamp
+	
+	#transform params
+	xy= array([data.pose.position.x,data.pose.position.y])
+	xy_tran=dot(xy,self.getRotMatrix(yaw))*scale+array([utm_x,utm_y])
+	
+	t.pose.position.x=xy_tran[0]
+	t.pose.position.y=xy_tran[1]
+	t.pose.position.z=0
+	
+	t.pose.orientation.x = 0.0
+    	t.pose.orientation.y = 0.0
+    	t.pose.orientation.z = 0.0
+    	t.pose.orientation.w = 1.0
+	#t.covariance=data.pose.covariance
+	#tfm = tf.msg.tfMessage([t])
+        self.pub_odom_Hector.publish(t)
+	with open('hector_utm.csv', 'a') as csvfile:
+		fieldnames = ['time','x_utm', 'y_utm']
+    		writer_hector = csv.DictWriter(csvfile, fieldnames=fieldnames)
+		writer_hector.writerow({'time': data.header.stamp ,'x_utm': xy_tran[0], 'y_utm': xy_tran[1]})
+   
+
+    def __init__(self):
+        rospy.Subscriber('/amcl_pose', geometry_msgs.msg.PoseWithCovarianceStamped, self.translateOdom_Amcl)
+	rospy.Subscriber('/slam_out_pose', geometry_msgs.msg.PoseStamped, self.translateOdom_Hector)
+        self.pub_odom_Amcl = rospy.Publisher("/utm/amcl_pose", geometry_msgs.msg.PoseWithCovarianceStamped,queue_size=20)
+	self.pub_odom_Hector = rospy.Publisher("/utm/slam_out_pose", geometry_msgs.msg.PoseStamped,queue_size=20)
+	self.pub_odom_latlong = rospy.Publisher("/latlong/amcl_pose", NavSatFix,queue_size=20)
+
+ 
+  
+ 
+           
+ 
+if __name__ == '__main__':
+    rospy.init_node('my_tf_broadcaster')
+    tfb = DynamicTFBroadcaster()
+    rospy.spin()

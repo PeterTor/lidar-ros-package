@@ -1,0 +1,5 @@
+mapping.launch ist für die echtzeitfähige version von hectormapping hier ist die auflösung nur 1M=1Px
+
+mapping2.launch ist die NICHT echtzeitfähige version von hectormapping, hier muss das rosbag 10x langsamer abgespielt werden
+
+laserscanmatcher.launch includiert amcl_diff und startet: Amcl, Laserscanmatcher und die map
